@@ -1,0 +1,776 @@
+---
+title: "COSA score"
+author: "VS"
+date: "16 9 2020"
+output: html_document
+editor_options: 
+    chunk_output_type: inline
+---
+#SETUP
+```{r setup, include=FALSE}
+library(magrittr)
+library(tidyverse)
+library(openxlsx)
+library(tidytext)
+library(data.table)
+library(purrr)
+library(plyr)
+library(scales)
+library(ggsci)
+library(plotly)
+library(RWeka)
+library(e1071)
+library(caretEnsemble)
+library(superpc)
+library(nnet)
+library(ranger)
+library(rattle)
+library(kernlab)
+library(MASS)
+library(DMwR)
+library(stringr)
+library(rms)
+library(randomForest)
+library(caret)
+library(RANN)
+library(reshape2)
+library(OptimalCutpoints)
+
+
+df.dataset <- readRDS("COSA_dataset_train")
+df.dataset.eval <- readRDS("COSA_dataset_val")
+
+
+tictoc::tic()
+
+```
+
+
+#Data preparation
+```{r}
+
+DataPart <- function(x, drop_na=T, impute=F) {
+  Mydf <- x
+  
+    if(drop_na) {
+      Mydf <- Mydf %>% 
+        drop_na()
+    }
+    
+    if(impute) {
+      Mydf_knn <- as.data.frame(Mydf)
+      Mydf <- knnImputation(Mydf_knn, 3, meth = "median")
+    }
+  
+    Mydf <- as.data.frame(Mydf)
+  
+    index <- createDataPartition(y=Mydf$severe, p=0.8, list=F, times=1)
+  
+    train.set <<- Mydf[index,]
+    test.set <<- Mydf[-index,]
+
+  return(Mydf)
+}
+
+```
+
+
+# LOESS smooth
+```{r}
+
+LOESS <- function(x) {
+
+#select continous data of train dataset
+  df.cont <- x %>% 
+  dplyr::select (NA_max,Hbn_min,  GL_max,  Leukn_max,CRP_max,  EPIGFR_min,  severe) #%>% -ace_inhibitors, -sex, 
+  df.cont <<- as.data.frame (df.cont)
+
+  #select categorical data of train dataset
+  df.cat<<- x %>% 
+    dplyr::select( sex)
+}
+
+```
+
+
+#Choosing cutoffs
+```{r}
+
+CutOffs <- function(x){
+
+  df.cont <<- x %>% 
+    dplyr::select(NA_max,Hbn_min,  GL_max,  Leukn_max,CRP_max,  EPIGFR_min,  severe) 
+  
+  NA_maxcut <- c(144)
+  NA_maxb <- paste0("[",min(df.cont$NA_max),",144]")
+  
+  CRP_maxcut <- c(25)
+  CRP_maxb <- paste0("[",min(df.cont$CRP_max),",25]")
+  
+  Hbn_mincut <- c(100) #110
+  Hbn_minb <- paste0("[100,",max(df.cont$Hbn_min),"]")
+  
+  GL_maxcut <- c(8.6)
+  GL_maxb <- paste0("[",min(df.cont$GL_max),",8.6]")
+  
+  EPIGFR_mincut <- c(75)
+  EPIGFR_minb <- paste0("[75,",max(df.cont$EPIGFR_min),"]")
+  
+  `Leukn_maxcut` <- c(10)
+  `Leukn_maxb` <- paste0("[",min(df.cont$Leukn_max),",10]")
+  
+  
+  cont.to.cat<<-data.frame (id=c(1:nrow(df.cont)))
+  for (var in names(df.cont%>% dplyr::select(-severe))) {
+    if(var!= "Hbn_min" & var!= "EPIGFR_min" & var!= "THZn_min") {  
+    cat<-cut(df.cont[,var],
+             breaks=c(min(df.cont[,var]),
+                      get(paste(var,"cut",sep="")),
+                      max(df.cont[,var])),include.lowest= TRUE)
+    } else {
+    cat<-cut(df.cont[,var],
+             breaks=c(max(df.cont[,var]),
+                      get(paste(var,"cut",sep="")),
+                      min(df.cont[,var])),include.lowest= TRUE, right = FALSE)    
+    }
+  
+    cat<-relevel(cat,ref=get(paste(var,"b",sep="")))
+  
+    cont.to.cat<<-cbind(cont.to.cat,cat)
+  }
+
+}
+
+```
+
+#Calculate scores
+```{r}
+
+CalScore <- function(x) {
+  
+  df.cont.to.cat<-x[,-1]
+  
+  colnames(df.cont.to.cat) <-colnames(df.cont %>% dplyr::select(-severe))
+    
+  df.final<- cbind(cbind(df.cat,df.cont.to.cat),
+                  severe=df.cont$severe)
+  
+  mod<-glm(severe~.,
+           df.final, family="binomial")
+  
+  score<<-round(coef(mod)[-1])
+  
+  score.cat<<-score[c("sex")]
+  
+  
+  score.cont<<-score[2:length(score)]
+
+}
+
+```
+
+
+#Scores numeric variables
+```{r}
+NumVar <- function(x) {
+  var.cont<-as.character(1)
+  
+  for(var in names(score.cont)){
+  
+    var.red<-sub("(\\(|\\[)[0-9]+.*", "", var)
+  
+    var.cont<-c(var.cont,var.red)
+    }
+  
+  var.cont<-unique(var.cont)[-1]
+  
+  ##train.set
+  for(var in var.cont){
+  
+    train.set[,paste(var,"points",sep=".")]<-as.numeric(NA)
+    }
+  
+  for (var in names(score.cont)){
+    
+    var.red<-sub("(\\(|\\[)[0-9]+.*", "", var)
+    var.low<-as.numeric(str_extract(var,'(?<=(\\(|\\[))[0-9]+\\.*[0-9]*(?=\\,)'))
+    var.upper<-as.numeric(str_extract(var,'(?<=\\,)[0-9]+\\.*[0-9]*(?=\\]|\\))')) 
+  
+    train.set[,paste(var.red,"points",sep=".")]<-ifelse(
+      train.set[,var.red]<=var.upper&train.set[,var.red]>=var.low,
+      score[var],train.set[,paste(var.red,"points",sep=".")])
+  
+    }
+  
+  for(var in var.cont){
+    train.set[,paste(var,"points",sep=".")]<-ifelse(
+      is.na(train.set[,paste(var,"points",sep=".")]),
+      0,train.set[,paste(var,"points",sep=".")]
+      )
+    }
+  
+  train.set <<- train.set
+  
+  ##test.set
+  for(var in var.cont){
+  
+    test.set[,paste(var,"points",sep=".")]<-as.numeric(NA)
+    }
+  
+  for (var in names(score.cont)){
+    
+    var.red<-sub("(\\(|\\[)[0-9]+.*", "", var)
+    var.low<-as.numeric(str_extract(var,'(?<=(\\(|\\[))[0-9]+\\.*[0-9]*(?=\\,)'))
+    var.upper<-as.numeric(str_extract(var,'(?<=\\,)[0-9]+\\.*[0-9]*(?=\\]|\\))')) 
+  
+    test.set[,paste(var.red,"points",sep=".")]<-ifelse(
+      test.set[,var.red]<=var.upper&test.set[,var.red]>=var.low,
+      score[var],test.set[,paste(var.red,"points",sep=".")])
+  
+    }
+  
+  for(var in var.cont){
+    test.set[,paste(var,"points",sep=".")]<-ifelse(
+      is.na(test.set[,paste(var,"points",sep=".")]),
+      0,test.set[,paste(var,"points",sep=".")]
+      )
+  }
+  
+  test.set <<- test.set
+
+}
+
+```
+
+
+#Calculate scores for factor variables and take a sum
+```{r}
+
+CatVar <- function(x){
+  var.cat<-names(df.cat)
+
+  train.set %<>%
+    mutate(sex.points = if_else(sex==1,score.cat[[1]],0))
+ 
+  train.set %<>%
+    mutate(score = rowSums(train.set[,grepl("\\.+points",names(train.set))]))
+  
+  train.set <<- train.set
+  
+  test.set %<>%
+      mutate(sex.points = if_else(sex==1,score.cat[[1]],0))
+  
+  test.set %<>%
+    mutate (score = rowSums(test.set[,grepl("\\.+points",names(test.set))]))
+  
+  test.set <<- test.set
+
+}
+
+```
+
+#Converting the score to probability of mortality and comparing it to observed number of deaths
+```{r}
+ConvScore <- function(x) {
+glmod<-glm(severe~score,
+           train.set,
+           family="binomial")
+
+newx<<-seq(min(train.set$score),
+          max(train.set$score))
+
+prd<<-predict(glmod,
+             newdata=data.frame(score=newx),
+             type="response",
+             se.fit=T)
+
+cnt<<-as.matrix(table(cut(train.set$score,
+                           breaks=seq(min(train.set$score),
+                                      max(train.set$score)),
+                           include.lowest = T), 
+                       train.set$severe))
+
+}
+
+  
+```
+
+#Validation of score
+```{r}
+ValScore <- function(x){
+  ddist <<- datadist(train.set)
+  options(datadist='ddist')
+  f.score<-lrm(severe~score,
+               train.set,
+               x=TRUE,y=TRUE)
+  
+  phat.score<-predict(f.score,
+                      test.set,
+                      type="fitted")
+  
+  v.score<<-val.prob(phat.score,
+                    test.set$severe,
+                    m=20)
+}
+
+```
+
+#Internal 30-fold validation of score
+
+```{r}
+
+seed <- 12345
+
+Score.Summary <- data.frame(matrix(ncol=0,nrow=0))
+
+
+for (i in 1:30){
+  seed <- seed+1
+  set.seed(seed)
+  
+  DataPart(df.dataset)
+  LOESS(train.set)
+  CutOffs(df.cont)
+  CalScore(cont.to.cat)
+  NumVar(0)
+  CatVar(0)
+  ConvScore(0)
+  ValScore(0)
+  
+  OptCut <- optimal.cutpoints(X="score", status="severe", tag.healthy = 0, methods ="MaxSpSe", data = test.set)
+
+  roc2<- OptCut$MaxSpSe$Global$measures.acc$AUC[[1]]
+
+  sens <- OptCut$MaxSpSe$Global$optimal.cutoff$Se[[1]]
+
+  spec <- OptCut$MaxSpSe$Global$optimal.cutoff$Sp[[1]]
+
+  
+  a <- as.data.frame(score)
+  b <- rbind(a, roc2, sens, spec)
+  b <- t(b)
+  colnames(b) <- c("Sex=M","NA_max>=144", "Hbn_min<=100", "GL_max>=8.6", "Leukn_max>=10", "CRP_max>=25", "EPIGFR_min<=75", "ROC-AUC", "Sens", "Spec")
+
+  Score.Summary <- rbind(Score.Summary,b)
+  
+rm(a,b)
+}
+
+```
+
+#on whole dataset
+```{r}
+df <- df.dataset %>% 
+  dplyr::select(matches(colnames(df.cont))| matches(colnames(df.cat)) | matches ("severe")) %>% 
+  mutate(Hbn_min_score = case_when (Hbn_min<=100 ~ 1,
+                                     TRUE ~ 0),
+         CRP_max_score = case_when (CRP_max>=25 ~ 3,
+                                     TRUE ~ 0),
+         EPIGFR_min_score = case_when (EPIGFR_min<=75 ~ 1,
+                                     TRUE ~ 0),
+         GL_max_score = case_when (GL_max>=8.6 ~ 1,
+                                     TRUE ~ 0),
+         Leukn_max_score = case_when (Leukn_max>=10 ~ 1,
+                                     TRUE ~ 0),
+         sex = if_else (sex==1, 1,0),
+         NA_max_score = case_when (NA_max>=144 ~ 2,
+                                     TRUE ~ 0)
+         ) %>% 
+  mutate(score = NA_max_score+sex + Hbn_min_score + CRP_max_score + Leukn_max_score +  GL_max_score + EPIGFR_min_score  ) 
+```
+
+# external Validation
+```{r}
+
+df.eval <- df.dataset.eval %>% 
+  mutate(Hbn_min_score = case_when (Hbn_min<=100 ~ 1,
+                                     TRUE ~ 0),
+         CRP_max_score = case_when (CRP_max>=25 ~ 3,
+                                     TRUE ~ 0),
+         EPIGFR_min_score = case_when (EPIGFR_min<=75 ~ 1,
+                                     TRUE ~ 0),
+         GL_max_score = case_when (GL_max>=8.6 ~ 1,
+                                     TRUE ~ 0),
+         Leukn_max_score = case_when (Leukn_max>=10 ~ 1,
+                                     TRUE ~ 0),
+         sex = if_else (sex==1, 1,0),
+         NA_max_score = case_when (NA_max>=144 ~ 2,
+                                     TRUE ~ 0)
+         ) %>% 
+  mutate(score = NA_max_score+sex + Hbn_min_score + CRP_max_score + Leukn_max_score +  GL_max_score + EPIGFR_min_score  ) 
+```
+
+
+#ML methods
+##PreProcessing
+```{r}
+
+  Mydf <- DataPart(df.dataset, drop_na=F, impute=T)
+  LOESS(train.set)
+  CutOffs(df.cont)
+  
+  df.eval <- df.dataset.eval
+  df.eval <- zoo::na.aggregate( df.eval, by="severe", FUN = median )
+
+###Scaling between 0 to 1
+pp <- preProcess(Mydf %>% 
+                   dplyr::select(matches(colnames(df.cont))| matches(colnames(df.cat)) | matches ("severe")),
+                 method = "range",
+                 rangeBounds = c(0, 1))
+
+train.range <- predict(pp, Mydf %>% 
+                         dplyr::select(matches(colnames(df.cont))| matches(colnames(df.cat)) | matches ("severe")))
+test.range <- predict(pp, df.eval%>%
+                        dplyr::select(matches(colnames(df.cont))| matches(colnames(df.cat)) | matches ("severe")))
+
+###Calculate Model weights
+a <- sum(train.range$severe==TRUE)/length(train.set$severe)
+
+model_weights <- if_else(train.range$severe == TRUE,
+                        (1/sum(train.range$severe==TRUE)) * (1-a),
+                        (1/sum(train.range$severe==FALSE)) * a)
+
+###create factor
+train.range %<>% 
+    mutate(severe= factor(severe, levels = c(0,1), labels = c("no", "yes")))
+
+test.range %<>% 
+    mutate(severe= factor(severe, levels = c(0,1), labels = c("no", "yes")))
+
+
+###Dataset for Random Forest and DTI
+rf.train <- Mydf %>% 
+  dplyr::select(matches(colnames(df.cont))| matches(colnames(df.cat)) | matches ("severe")) %>% 
+  mutate(severe= factor(severe, levels = c(0,1), labels = c("no", "yes")))
+
+rf.test <- df.eval %>% 
+  dplyr::select(matches(colnames(df.cont))| matches(colnames(df.cat)) | matches ("severe")) %>% 
+  mutate(severe= factor(severe, levels = c(0,1), labels = c("no", "yes")))
+
+Summary.ML <- data.frame()
+
+```
+
+##DTI
+```{r}
+set.seed(1234) # keep reproducible
+
+control <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3, 
+                        summaryFunction = twoClassSummary)
+
+###Modelling
+score.dti = caret::train(severe ~ ., 
+                       data=rf.train,
+                       method="rpart",
+                       tuneLength=50,
+                       weights = model_weights,
+                       trControl = control,
+                      na.action = na.roughfix,
+                      metric = "ROC")
+score.dti$finalModel
+
+fancyRpartPlot(score.dti$finalModel, main="Severe course of Covid patients", sub="yes - severe probable, no - severe not probable")
+
+###Validation
+pred <- predict( score.dti,
+                 newdata = rf.test )
+
+obs <- rf.test$severe
+
+conf.dti <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+Summary.ML<-as.data.frame(conf.dti$byClass[c(1,2,5,7)])
+colnames(Summary.ML) <- "DTI"
+
+```
+
+##Random Forest
+```{r}
+#10 folds repeat 3 times
+control <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3,
+                        summaryFunction = twoClassSummary)
+#Metric compare model is Accuracy
+set.seed(123)
+
+score.rf = caret::train(severe ~ ., 
+                       data=rf.train,
+                       method="rf",
+                       tuneLength=50,
+                       weights = model_weights,
+                       trControl = control,
+                       na.action = na.roughfix,
+                       metric="ROC")#(method = "cv"))
+
+
+
+score.rf$finalModel
+
+pred <- predict( score.rf,
+                 newdata = rf.test)
+
+obs <- rf.test$severe
+
+conf.rf <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+b<-as.data.frame(conf.rf$byClass[c(1,2,5,7)])
+colnames(b) <- "RF"
+
+Summary.ML <- cbind(Summary.ML,b)
+
+rm(b)
+
+```
+
+
+##Adaboost
+```{r}
+
+set.seed(100)
+
+# Train the model using adaboost
+
+control <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3,
+                        summaryFunction = twoClassSummary)
+
+###Modelling
+score.adaboost = caret::train(severe ~ ., 
+                       data=train.range,
+                       method="adaboost",
+                       tuneLength=3,
+                       weights = model_weights,
+                       trControl = control,
+                       na.action = na.roughfix, 
+                       metric="ROC")
+
+score.adaboost$finalModel
+
+###Validation
+pred <- predict( score.adaboost,
+                 newdata = test.range)
+
+obs <- test.range$severe
+
+conf.adaboost <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+b<-as.data.frame(conf.adaboost$byClass[c(1,2,5,7)])
+colnames(b) <- "Adaboost"
+
+Summary.ML <- cbind(Summary.ML,b)
+
+rm(b)
+
+
+```
+##SVM
+```{r}
+
+set.seed(100)
+
+# Train the model using adaboost
+
+control <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3,
+                        summaryFunction = twoClassSummary)
+
+###Modelling
+score.svm = caret::train(severe ~ ., 
+                       data=train.range,
+                       method="svmLinear2",
+                       tuneLength=3,
+                       weights = model_weights,
+                       trControl = control,
+                       na.action = na.roughfix, 
+                       metric="ROC")
+
+score.svm$finalModel
+
+###Validation
+pred <- predict( score.svm,
+                 newdata = test.range)
+
+obs <- test.range$severe
+
+conf.svm <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+b<-as.data.frame(conf.svm$byClass[c(1,2,5,7)])
+colnames(b) <- "SVM"
+
+Summary.ML <- cbind(Summary.ML,b)
+
+```
+
+##kNN
+```{r}
+
+set.seed(100)
+
+# Train the model using adaboost
+
+control <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3,
+                        summaryFunction = twoClassSummary)
+
+###Modelling
+score.knn = caret::train(severe ~ ., 
+                       data=train.range,
+                       method="knn",
+                       tuneLength=3,
+                       weights = model_weights,
+                       trControl = control,
+                       na.action = na.roughfix, 
+                       metric="ROC")
+
+score.knn$finalModel
+
+###Validation
+pred <- predict( score.knn,
+                 newdata = test.range)
+
+obs <- test.range$severe
+
+conf.knn <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+b<-as.data.frame(conf.knn$byClass[c(1,2,5,7)])
+colnames(b) <- "kNN"
+
+Summary.ML <- cbind(Summary.ML,b)
+
+rm(b)
+
+
+```
+
+##Multilaver Percepton
+```{r}
+
+set.seed(100)
+
+# Train the model using mlpML
+trainControl <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3,
+                        summaryFunction = twoClassSummary)
+
+mlp_grid = expand.grid(layer1 = 5,
+                       layer2 = 4,
+                       layer3 = 3)
+
+###Modelling
+score.mlp = caret::train(severe ~ ., 
+                       data=train.range,
+                       method="mlp",
+                       tuneLength=6,
+                       weights = model_weights,
+                       trControl = trainControl,
+                       na.action = na.roughfix,
+                       metric="ROC")
+
+###Validation
+pred <- predict( score.mlp,
+                 newdata = test.range)
+
+obs <- test.range$severe
+
+conf.mlp <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+b<-as.data.frame(conf.mlp$byClass[c(1,2,5,7)])
+colnames(b) <- "MLP"
+
+Summary.ML <- cbind(Summary.ML,b)
+
+
+rm(b)
+
+
+```
+
+##LogReg
+```{r}
+
+set.seed(100)
+
+# Train the model using adaboost
+control <- trainControl(method='repeatedcv', 
+                        classProbs = TRUE,
+                        number=10, 
+                        repeats=3,
+                        summaryFunction = twoClassSummary)
+
+###Modelling
+score.logreg = caret::train(severe ~ ., 
+                       data=train.range,
+                       method="glm",
+                       family=binomial,
+                       tuneLength=3,
+                       weights = model_weights,
+                       trControl = control,
+                       na.action = na.roughfix, 
+                       metric="ROC")
+
+score.logreg$finalModel
+
+###Validation
+pred <- predict( score.logreg,
+                 newdata = test.range)
+
+obs <- test.range$severe
+
+conf.logreg <- confusionMatrix(reference = obs, data = pred, mode='everything')
+
+b<-as.data.frame(conf.logreg$byClass[c(1,2,5,7)])
+colnames(b) <- "Log Reg"
+
+Summary.ML <- cbind(Summary.ML,b)
+
+rm(b)
+
+
+```
+
+##Compare model performance
+
+###Internal validation
+```{r}
+# Compare model performances using resample()
+resamps <- resamples(list(LOGREG=score.logreg, ADABOOST=score.adaboost, RF=score.rf ,DTI=score.dti, kNN= score.knn, SVM=score.svm, MLP=score.mlp ))#
+
+a <- resamps$values
+
+
+b <- Score.Summary %>% 
+  dplyr::select('SCORE~ROC' = 'ROC-AUC', 'SCORE~Sens' =Sens, 'SCORE~Spec' =Spec) 
+
+c <- cbind(a,b)
+
+```
+
+###external validation
+
+```{r}
+df.ml <- as.data.frame(t(Summary.ML))
+
+df.ml <- df.ml %>% 
+  rownames_to_column(., var="Model") %>% 
+  pivot_longer(c("Sensitivity","Specificity", "Precision", "F1"), names_to = "Metric", values_to= "Value")
+
+```
+
+
+```{r}
+tictoc::toc()
+```
+
