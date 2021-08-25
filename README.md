@@ -4,7 +4,7 @@
 This repo contains the data and model code for reproducing and implementing prognostic risk stratification tools for Covid-19 patients. The score was built on patient data from the [Insel Hospital Group, Bern, Switzerland](https://www.insel.ch) between February 1st and August 31st (‘first wave’, n=198) and September 1st through November 16th 2020 (‘second wave’, n=459). An online version of the score calculator is [available here](https://cptbern.github.io/cosa/).
 
 <center><img src="images/flowchart.png" width="600"></center>
-*Flowchart of training and validation cohort used for model and score development*
+Flowchart of training and validation cohort used for model and score development
 
 
 ## Models and performance
