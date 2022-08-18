@@ -1,0 +1,430 @@
+---
+title: "COSA variants"
+author: "VS"
+date: "7 2 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(openxlsx)
+library(tidytext)
+# library(lubridate)
+library (dplyr)
+library(magrittr)
+library(ROCR)
+library(qwraps2)
+library(gridExtra)
+library(grid)
+library(pROC)
+
+```
+
+#load files
+```{r}
+
+load(file = "data.RData")
+
+```
+
+#variants in Switzerland
+```{r}
+
+df <- bag.variants %>% 
+  filter(geoRegion == "CHFL", variant_type!="all_sequenced") %>% 
+  mutate(variant_name = case_when (grepl("B.1.1.529",variant_type) ~ "Omicron",
+                                   grepl("B.1.1.7", variant_type) ~ "Alpha",
+                                   grepl("B.1.617.2", variant_type) ~ "Delta",
+                                   grepl("B.1.351", variant_type) ~ "Beta",
+                                   grepl("other", variant_type) ~ "other"))
+
+ggplot(df, aes(x=date, y=entries, color=variant_name)) +
+  geom_line() + 
+  xlab("")+
+  ylab("count")+
+  scale_x_date(date_breaks = "1 month", date_labels = "%m-%Y")+
+  # theme_ipsum() +
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+#original cohort
+```{r}
+#df.eval1: original cohort
+
+df.cosa1 <- df.eval1 %>% 
+  dplyr::select(Hbn_min, CRP_max, EPIGFR_min, GL_max, Leukn_max, NA_max, sex, severe) %>% 
+  mutate(Hbn_min_score = case_when (Hbn_min<=100 ~ 1,
+                                     TRUE ~ 0),
+         CRP_max_score = case_when (CRP_max>=25 ~ 3,
+                                     TRUE ~ 0),
+         EPIGFR_min_score = case_when (EPIGFR_min<=75 ~ 1,
+                                     TRUE ~ 0),
+         GL_max_score = case_when (GL_max>=8.6 ~ 1,
+                                     TRUE ~ 0),
+         Leukn_max_score = case_when (Leukn_max>=10 ~ 1,
+                                     TRUE ~ 0),
+
+         sex = if_else (sex==1, 1,0),
+         NA_max_score = case_when (NA_max>=144 ~ 2,
+                                     TRUE ~ 0)
+         ) %>% 
+  mutate(score = NA_max_score+sex + Hbn_min_score + CRP_max_score + Leukn_max_score +  GL_max_score + EPIGFR_min_score  )
+```
+
+##visualisation
+```{r}
+
+a1 <- df.cosa1 %>% 
+  ggplot(., aes(x=score, fill=as.factor (severe))) +
+  geom_bar(position="fill", width = 0.8, show.legend = FALSE)+
+  scale_x_continuous(breaks=c(0:10))+
+  # scale_fill_discrete(name="Severe Covid-19",
+  #                        labels=c("No", "Yes"))+
+  scale_fill_manual(name="Severe Covid-19:",
+                    labels=c("No", "Yes"),
+                    values = c("#3300CC","#CC0033"))+
+  theme_bw() +
+  # theme(legend.position=none)+#"bottom")+
+  labs( title="COSA score evaluation in COVID-19 population",
+        subtitle = "A. Original cohort",
+        x="Score",
+        y="% of patients",
+        legend=none)
+
+```
+
+#revalidation cohort
+
+```{r}
+df.cosa2 <- df.eval2 %>% 
+  dplyr::select(Hbn_min, CRP_max, EPIGFR_min, GL_max, Leukn_max, NA_max, sex, severe) %>% 
+  mutate(Hbn_min_score = case_when (Hbn_min<=100 ~ 1,
+                                     TRUE ~ 0),
+         CRP_max_score = case_when (CRP_max>=25 ~ 3,
+                                     TRUE ~ 0),
+         EPIGFR_min_score = case_when (EPIGFR_min<=75 ~ 1,
+                                     TRUE ~ 0),
+         GL_max_score = case_when (GL_max>=8.6 ~ 1,
+                                     TRUE ~ 0),
+         Leukn_max_score = case_when (Leukn_max>=10 ~ 1,
+                                     TRUE ~ 0),
+
+         sex = if_else (sex==1, 1,0),
+         NA_max_score = case_when (NA_max>=144 ~ 2,
+                                     TRUE ~ 0)
+         ) %>% 
+  mutate(score = NA_max_score+sex + Hbn_min_score + CRP_max_score + Leukn_max_score +  GL_max_score + EPIGFR_min_score  )
+```
+
+##visualisation
+```{r}
+a2 <- df.cosa2 %>% 
+  ggplot(., aes(x=score, fill=as.factor (severe))) +
+  geom_bar(position="fill", width = 0.8)+
+  scale_x_continuous(breaks=c(0:10))+
+  # scale_fill_discrete(name="Severe Covid-19",
+  #                        labels=c("No", "Yes"))+
+  scale_fill_manual(name="Severe COVID-19:",
+                    labels=c("No", "Yes"),
+                    values = c("#3300CC","#CC0033"))+
+    theme_bw() +
+  theme(legend.position="bottom")+
+  labs( #title="Severity score evaluation in Covid population",
+        subtitle = "B. Revalidation cohort",
+        x="Score",
+        y="% of patients")
+
+```
+
+```{r, fig.height=8, fig.width=6}
+b <- grid.arrange(a1, a2)
+
+
+```
+
+
+#AUROC
+
+```{r}
+df.eval.all <- rbind(df.cosa1 %>% 
+                       mutate(type="Original"),
+                     df.cosa2%>% 
+                       mutate(type="Revalidation"))
+
+b <- ROCR::prediction(df.cosa1$score, df.cosa1$severe)
+
+c1 <- performance(b, measure="auc")
+
+roc.perf1 = performance(b, measure = "tpr", x.measure = "fpr")
+
+df.x1 <- data.frame(FalsePositive=c(roc.perf1@x.values[[1]]),
+                 TruePositive=c(roc.perf1@y.values[[1]]))
+
+b <- ROCR::prediction(df.cosa2$score, df.cosa2$severe)
+
+c2 <- performance(b, measure="auc")
+
+roc.perf2 = performance(b, measure = "tpr", x.measure = "fpr")
+
+df.x2 <- data.frame(FalsePositive=c(roc.perf2@x.values[[1]]),
+                 TruePositive=c(roc.perf2@y.values[[1]]))
+
+label1 = paste0("AUROC=",round(c1@y.values[[1]],3)," (original cohort)")
+label2 = paste0("AUROC=",round(c2@y.values[[1]],3), " (revalidation cohort)")
+```
+
+```{r, fig.height=3.5, fig.width=4.0}
+g1 <- ggplot( rbind( data.frame( FalsePositive=c(roc.perf1@x.values[[1]])*100,
+                           TruePositive=c(roc.perf1@y.values[[1]])*100,
+                           group="Original cohort" ),
+               data.frame( FalsePositive=c(roc.perf2@x.values[[1]])*100,
+                           TruePositive=c(roc.perf2@y.values[[1]])*100,
+                           group="Revalidation cohort") ), 
+        aes(FalsePositive, TruePositive, group=group, color=group) ) +
+  geom_line( size=1) +
+  geom_abline( linetype="dashed", color="grey") +
+  annotate(x=45, y=70, geom = "text", label = paste0("AUROC = ", round(c2@y.values[[1]],3)), color="black", size=2.5) +
+  annotate(x=15, y=90, geom = "text", label = paste0("AUROC = ", round(c1@y.values[[1]],3)), color="black", size=2.5) +
+  ggsci::scale_color_nejm() +
+  labs( x="False positive rate [%]",
+        y="True positive rate [%]",
+        color="") +
+  theme_bw() +
+  theme( legend.position = c(0.65, 0.20),
+         panel.grid.major = element_blank(), 
+         panel.grid.minor = element_blank()) 
+
+g1
+
+```
+
+
+##Confidence interval roc
+```{r}
+
+
+## Original cohort
+roc1 <- pROC::roc(df.cosa1$severe, df.cosa1$score, ci=TRUE)
+
+ci1 <- pROC::ci.auc(roc1)
+
+## revalidation cohort
+roc2 <- pROC::roc(df.cosa2$severe, df.cosa2$score, ci=TRUE)
+
+ci2 <- pROC::ci.auc(roc2)
+
+roc1
+roc2
+
+
+```
+
+
+#Compare patient populations
+## Demographics
+
+```{r}
+# 
+df <- rbind(df.eval1 %>% mutate(type="Original cohort"),
+            df.eval2 %>% mutate(type="Revalidation cohort"))
+
+
+options(qwraps2_markup = "markdown")
+
+
+summtab1 <- as.data.frame (df%>% 
+                             mutate(type = factor (type, levels = c("Original cohort", "Revalidation cohort"), labels = c( "Original cohort", "Revalidation cohort"))) %>% 
+                             filter(severe==0))
+                           
+summtab2 <- as.data.frame (df%>% 
+                             mutate(type = factor (type, levels = c("Original cohort", "Revalidation cohort"), labels = c( "Original cohort", "Revalidation cohort"))) %>% 
+                             filter(severe==1))
+  
+summstat <-list(
+    "Age (years)" =
+      list("Median (Q1,Q3)" = ~ median_iqr(age, na_rm = TRUE)
+      ),
+    "Sex" =
+      list("Female, n (%)" = ~qwraps2::n_perc(sex == "0")
+      ),
+    "Hospitalisation"=
+      list("Inpatients, n (%)" = ~qwraps2::n_perc(inpatient == "1")
+      ),
+    "Deaths"=
+      list("Deceased, n (%)" = ~qwraps2::n_perc(deceased == "1")
+      ),
+    "Weight (kg)"=
+      list("Median (Q1,Q3)" = ~ median_iqr(weight, na_rm = TRUE, show_n="never")
+      ),
+    "Height (cm)"=
+      list("Median (Q1,Q3)" = ~ median_iqr(height, na_rm = TRUE, show_n="never")
+      ),
+    "Body Mass Index" =
+      list("Median (Q1,Q3)" = ~median_iqr(bmi, na_rm = TRUE, show_n="never")
+           )
+      )
+
+# build summary stat table
+
+s2 <- summary_table(dplyr::group_by(summtab1, type), summstat)
+
+mpvals <-
+  sapply(
+         list(
+              chisq.test(summtab1$sex , summtab1$type),
+              chisq.test(summtab1$inpatient , summtab1$type )
+              ), function(x) paste(ifelse(x$p.value<0.002, "<",""), ifelse(x$p.value<0.002, 0.002,round(x$p.value, digits=4))))
+
+mpvals <- c(mpvals[1], mpvals[2], "NA") #no deceased, as non-severe cohort
+
+
+s2 <- cbind(s2, "P-value" = "")
+s2[grepl("(%)", rownames(s2)), "P-value"] <- mpvals
+
+# difference in means continuous data
+mpvals <-
+  unlist(
+         list(round(wilcox.test(age ~ type,  data = summtab1)$p.value, 3),
+              round(wilcox.test(weight ~ type,  data = summtab1)$p.value, 3),
+              round(wilcox.test(height ~ type, data = summtab1)$p.value, 3),
+              round(wilcox.test(bmi ~ type,   data = summtab1)$p.value, 3))
+)
+
+
+s2[grepl("Median \\(Q1,Q3\\)", rownames(s2)), "P-value"] <- mpvals
+
+
+
+a <- capture.output(print(s2))
+
+###Revalidation cohort
+s3 <- summary_table(dplyr::group_by(summtab2, type), summstat)
+
+
+mpvals <-
+  sapply(
+         list(
+              chisq.test(summtab2$sex , summtab2$type),
+              chisq.test(summtab2$inpatient , summtab2$type ),
+              chisq.test(summtab2$deceased , summtab2$type )
+              ), function(x) paste(ifelse(x$p.value<0.002, "<",""), ifelse(x$p.value<0.002, 0.002,round(x$p.value, digits=4)))) 
+s3 <- cbind(s3, "P-value" = "")
+s3[grepl("(%)", rownames(s3)), "P-value"] <- mpvals
+
+
+# difference in means continous data
+mpvals <-
+  unlist(
+         list(round(wilcox.test(age ~ type,  data = summtab2)$p.value, 3),
+              round(wilcox.test(weight ~ type,  data = summtab2)$p.value, 3),
+              round(wilcox.test(height ~ type, data = summtab2)$p.value, 3),
+              round(wilcox.test(bmi ~ type,   data = summtab2)$p.value, 3))
+  )
+
+
+s3[grepl("Median \\(Q1,Q3\\)", rownames(s3)), "P-value"] <- mpvals
+
+
+a <- capture.output(print(s3))
+
+
+```
+
+## Laboratory values
+```{r}
+
+options(qwraps2_markup = "markdown")
+
+
+summtab1 <- as.data.frame (df%>% 
+                             mutate(type = factor (type, levels = c("Original cohort", "Revalidation cohort"), labels = c( "Original cohort", "Revalidation cohort"))) %>% 
+                             filter(severe==0))
+                           
+summtab2 <- as.data.frame (df%>% 
+                             mutate(type = factor (type, levels = c("Original cohort", "Revalidation cohort"), labels = c( "Original cohort", "Revalidation cohort"))) %>% 
+                             filter(severe==1))
+  
+  
+summstat <-
+  list(
+    "Maximal CRP levels" =
+      list(
+           "Median (Q1,Q3)" = ~median_iqr(CRP_max, na_rm = TRUE, show_n="never")
+
+      ),
+        "Maximal sodium levels" =
+      list(
+           "Median (Q1,Q3)" = ~median_iqr(NA_max, na_rm = TRUE, show_n="never")
+      ),
+    "Minimal haemoglobin levels" =
+      list(
+           "Median (Q1,Q3)" = ~median_iqr(Hbn_min, na_rm = TRUE, show_n="never")
+      ),
+    "Minimal GFR values" =
+      list(
+           "Median (Q1,Q3)" = ~median_iqr(EPIGFR_min, na_rm = TRUE, show_n="never")
+      ),
+    "Maximal glucose values" =
+      list(
+           "Median (Q1,Q3)" = ~median_iqr(GL_max, na_rm = TRUE, show_n="never")
+
+      ),
+    "Maximal leukocytes values" =
+      list(
+           "Median (Q1,Q3)" = ~median_iqr(Leukn_max, na_rm = TRUE, show_n="never")
+      )
+  )
+
+# build summary stat table
+s2 <- summary_table(dplyr::group_by(summtab1, type), summstat)
+
+
+# difference in means continous data
+mpvals <-
+  unlist(
+         list(round(wilcox.test(CRP_max ~ type,  data = summtab1)$p.value, 3),
+              round(wilcox.test(NA_max ~ type,  data = summtab1)$p.value,3),
+              round(wilcox.test(Hbn_min ~ type, data = summtab1)$p.value,3),
+              round(wilcox.test(EPIGFR_min ~ type,   data = summtab1)$p.value,3),
+              round(wilcox.test(GL_max ~ type,   data = summtab1)$p.value,3),
+              round(wilcox.test(Leukn_max ~ type,   data = summtab1)$p.value,3)))
+
+
+s2 <- cbind(s2, "P-value" = "")
+s2[grepl("Median \\(Q1,Q3\\)", rownames(s2)), "P-value"] <- mpvals
+
+s2
+
+# build summary stat table
+s3 <- summary_table(dplyr::group_by(summtab2, type), summstat)
+
+
+# difference in means continous data
+mpvals <-
+  unlist(
+         list(round(wilcox.test(CRP_max ~ type,  data = summtab2)$p.value, 3),
+              round(wilcox.test(NA_max ~ type,  data = summtab2)$p.value,3),
+              round(wilcox.test(Hbn_min ~ type, data = summtab2)$p.value,3),
+              round(wilcox.test(EPIGFR_min ~ type,   data = summtab2)$p.value,3),
+              round(wilcox.test(GL_max ~ type,   data = summtab2)$p.value,3),
+              round(wilcox.test(Leukn_max ~ type,   data = summtab2)$p.value,3)))
+
+
+s3 <- cbind(s3, "P-value" = "")
+s3[grepl("Median \\(Q1,Q3\\)", rownames(s2)), "P-value"] <- mpvals
+
+s3
+
+```
+
+##Normality test
+```{r}
+
+
+a <- lapply(summtab1 %>% dplyr::select(CRP_max,NA_max, Hbn_min, EPIGFR_min, GL_max, Leukn_max), shapiro.test)
+
+a
+
+```
