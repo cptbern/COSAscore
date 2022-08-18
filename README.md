@@ -17,6 +17,6 @@ The *R* scripts cover a clinical risk stratification score and machine learning 
 
 ## Reference to orginal article
 
-*Schöning, V., C. et al. Development and validation of a prognostic COVID-19 severity assessment (COSA) score and machine learning models for patient triage at a tertiary hospital. J Transl Med 19, 56 (2021). doi.org/10.1186/s12967-021-02720-w*
+*Schöning, V. et al. Development and validation of a prognostic COVID-19 severity assessment (COSA) score and machine learning models for patient triage at a tertiary hospital. J Transl Med 19, 56 (2021). doi.org/10.1186/s12967-021-02720-w*
 
 [link to original publication (open access)](https://translational-medicine.biomedcentral.com/articles/10.1186/s12967-021-02720-w)
